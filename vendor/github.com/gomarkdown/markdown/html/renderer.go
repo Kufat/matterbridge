@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/gomarkdown/markdown/ast"
-	"github.com/gomarkdown/markdown/internal/valid"
 	"github.com/gomarkdown/markdown/parser"
 )
 
@@ -133,6 +132,11 @@ type Renderer struct {
 	// if > 0, will strip html tags in Out and Outs
 	DisableTags int
 
+	// IsSafeURLOverride allows overriding the default URL matcher. URL is
+	// safe if the overriding function returns true. Can be used to extend
+	// the default list of safe URLs.
+	IsSafeURLOverride func(url []byte) bool
+
 	sr *SPRenderer
 
 	documentMatter ast.DocumentMatters // keep track of front/main/back matter.
@@ -213,6 +217,11 @@ func NewRenderer(opts RendererOptions) *Renderer {
 }
 
 func isRelativeLink(link []byte) (yes bool) {
+	// empty links considerd relative
+	if len(link) == 0 {
+		return true
+	}
+
 	// a tag begin with '#'
 	if link[0] == '#' {
 		return true
@@ -242,6 +251,9 @@ func isRelativeLink(link []byte) (yes bool) {
 }
 
 func (r *Renderer) addAbsPrefix(link []byte) []byte {
+	if len(link) == 0 {
+		return link
+	}
 	if r.opts.AbsolutePrefix != "" && isRelativeLink(link) && link[0] != '.' {
 		newDest := r.opts.AbsolutePrefix
 		if link[0] != '/' {
@@ -281,11 +293,16 @@ func isMailto(link []byte) bool {
 	return bytes.HasPrefix(link, []byte("mailto:"))
 }
 
-func needSkipLink(flags Flags, dest []byte) bool {
+func needSkipLink(r *Renderer, dest []byte) bool {
+	flags := r.opts.Flags
 	if flags&SkipLinks != 0 {
 		return true
 	}
-	return flags&Safelink != 0 && !isSafeLink(dest) && !isMailto(dest)
+	isSafeURL := r.IsSafeURLOverride
+	if isSafeURL == nil {
+		isSafeURL = parser.IsSafeURL
+	}
+	return flags&Safelink != 0 && !isSafeURL(dest) && !isMailto(dest)
 }
 
 func appendLanguageAttr(attrs []string, info []byte) []string {
@@ -481,7 +498,7 @@ func (r *Renderer) linkExit(w io.Writer, link *ast.Link) {
 // Link writes ast.Link node
 func (r *Renderer) Link(w io.Writer, link *ast.Link, entering bool) {
 	// mark it but don't link it if it is not a safe link: no smartypants
-	if needSkipLink(r.opts.Flags, link.Destination) {
+	if needSkipLink(r, link.Destination) {
 		r.OutOneOf(w, entering, "<tt>", "</tt>")
 		return
 	}
@@ -1226,28 +1243,6 @@ func isListItemTerm(node ast.Node) bool {
 	return ok && data.ListFlags&ast.ListTypeTerm != 0
 }
 
-func isSafeLink(link []byte) bool {
-	for _, path := range valid.Paths {
-		if len(link) >= len(path) && bytes.Equal(link[:len(path)], path) {
-			if len(link) == len(path) {
-				return true
-			} else if isAlnum(link[len(path)]) {
-				return true
-			}
-		}
-	}
-
-	for _, prefix := range valid.URIs {
-		// TODO: handle unicode here
-		// case-insensitive prefix test
-		if len(link) > len(prefix) && bytes.Equal(bytes.ToLower(link[:len(prefix)]), prefix) && isAlnum(link[len(prefix)]) {
-			return true
-		}
-	}
-
-	return false
-}
-
 // TODO: move to internal package
 // Create a url-safe slug for fragments
 func slugify(in []byte) []byte {
@@ -1281,33 +1276,6 @@ func slugify(in []byte) []byte {
 		}
 	}
 	return out[a : b+1]
-}
-
-// TODO: move to internal package
-// isAlnum returns true if c is a digit or letter
-// TODO: check when this is looking for ASCII alnum and when it should use unicode
-func isAlnum(c byte) bool {
-	return (c >= '0' && c <= '9') || isLetter(c)
-}
-
-// isSpace returns true if c is a white-space charactr
-func isSpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
-}
-
-// isLetter returns true if c is ascii letter
-func isLetter(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-}
-
-// isPunctuation returns true if c is a punctuation symbol.
-func isPunctuation(c byte) bool {
-	for _, r := range []byte("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~") {
-		if c == r {
-			return true
-		}
-	}
-	return false
 }
 
 // BlockAttrs takes a node and checks if it has block level attributes set. If so it
